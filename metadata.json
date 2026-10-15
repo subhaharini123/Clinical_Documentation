@@ -1,0 +1,6 @@
+{
+  "name": "ClinicNote AI",
+  "description": "Consent-based clinical documentation assistant drafting verified SOAP notes with clinician review and deterministic safety safeguards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
