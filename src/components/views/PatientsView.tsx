@@ -33,18 +33,21 @@ import {
   StoredDoseEvent,
   MissedDoseAlert,
   PatientAdherenceSummary,
+  StoredCallLog,
   getPatientsForDoctor,
   getPrescriptionsForPatient,
   getMedicationsForPrescription,
   getAllDoseEvents,
   getPatientAdherenceSummary,
   getMissedDoseAlerts,
+  getCallLogsForPatient,
   markAlertRead,
   seedInitialData,
   addAuditLogEntry
 } from '../../lib/store';
 import { downloadPrescriptionPdf } from '../../lib/prescriptionPdf';
 import { useToast } from '../ui/toast';
+import { PhoneCall, PhoneMissed, MessageSquare, ChevronDown, ChevronUp, Siren } from 'lucide-react';
 
 interface PatientsViewProps {
   onStartNewConsultation: () => void;
@@ -58,6 +61,9 @@ export function PatientsView({ onStartNewConsultation, doctorId = 'doc-demo' }: 
   const [patientPrescriptions, setPatientPrescriptions] = useState<StoredPrescription[]>([]);
   const [prescriptionMeds, setPrescriptionMeds] = useState<Record<string, StoredMedication[]>>({});
   const [patientDoses, setPatientDoses] = useState<StoredDoseEvent[]>([]);
+  const [patientCallLogs, setPatientCallLogs] = useState<StoredCallLog[]>([]);
+  const [patientDetailTab, setPatientDetailTab] = useState<'regimen' | 'calls'>('regimen');
+  const [expandedCallId, setExpandedCallId] = useState<string | null>(null);
   const [adherenceSummaries, setAdherenceSummaries] = useState<Record<string, PatientAdherenceSummary>>({});
   const [missedAlerts, setMissedAlerts] = useState<MissedDoseAlert[]>([]);
   const [showAlertsDrawer, setShowAlertsDrawer] = useState(false);
@@ -114,6 +120,10 @@ export function PatientsView({ onStartNewConsultation, doctorId = 'doc-demo' }: 
         // Load all dose history for table
         const doses = await getAllDoseEvents(selectedPatient.id);
         setPatientDoses(doses);
+
+        // Load AI voice reminder call logs
+        const callLogs = await getCallLogsForPatient(selectedPatient.id);
+        setPatientCallLogs(callLogs);
       } catch (err) {
         console.error('Failed to load patient prescriptions:', err);
       }
@@ -161,6 +171,7 @@ export function PatientsView({ onStartNewConsultation, doctorId = 'doc-demo' }: 
   };
 
   const unreadAlertsCount = missedAlerts.filter((a) => !a.read).length;
+  const problemAlertsCount = missedAlerts.filter((a) => !a.read && a.type === 'problem_reported').length;
 
   const filteredPatients = patients.filter((p) => {
     const q = searchQuery.toLowerCase();
@@ -189,21 +200,25 @@ export function PatientsView({ onStartNewConsultation, doctorId = 'doc-demo' }: 
         </div>
 
         <div className="flex items-center gap-2.5">
-          {/* Notification Bell with Missed-Dose Badge */}
+          {/* Notification Bell with Missed-Dose & Problem-Reported Badge */}
           <button
             type="button"
             onClick={() => setShowAlertsDrawer(!showAlertsDrawer)}
             className={`relative p-2.5 rounded-xl border transition-all cursor-pointer flex items-center gap-2 text-xs font-bold ${
-              unreadAlertsCount > 0
+              problemAlertsCount > 0
+                ? 'bg-red-600 border-red-700 text-white shadow-md animate-pulse ring-2 ring-red-400'
+                : unreadAlertsCount > 0
                 ? 'bg-red-50 border-red-300 text-red-800 hover:bg-red-100'
                 : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
             }`}
-            title="Missed-dose notifications"
+            title="Clinical Notifications & Call Alerts"
           >
-            <Bell className={`h-4 w-4 ${unreadAlertsCount > 0 ? 'text-red-600 animate-wiggle' : 'text-slate-500'}`} />
-            <span>Missed-Dose Alerts</span>
+            <Bell className={`h-4 w-4 ${problemAlertsCount > 0 ? 'text-white animate-bounce' : unreadAlertsCount > 0 ? 'text-red-600 animate-wiggle' : 'text-slate-500'}`} />
+            <span>
+              {problemAlertsCount > 0 ? 'Urgent Problem Alert!' : 'Clinical Alerts'}
+            </span>
             {unreadAlertsCount > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full text-[10px] font-black bg-red-600 text-white">
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${problemAlertsCount > 0 ? 'bg-white text-red-700' : 'bg-red-600 text-white'}`}>
                 {unreadAlertsCount}
               </span>
             )}
@@ -241,40 +256,63 @@ export function PatientsView({ onStartNewConsultation, doctorId = 'doc-demo' }: 
                 No missed dose alerts on file.
               </p>
             ) : (
-              missedAlerts.map((alt) => (
-                <div
-                  key={alt.id}
-                  className={`p-3 rounded-xl border flex items-center justify-between text-xs transition-all ${
-                    alt.read ? 'bg-white/60 border-slate-200 opacity-70' : 'bg-white border-red-300 shadow-2xs'
-                  }`}
-                >
-                  <div className="flex items-start gap-2.5">
-                    <span className="h-2 w-2 rounded-full bg-red-500 mt-1.5 shrink-0" />
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <strong className="text-slate-900 font-bold">{alt.patientName}</strong>
-                        <span className="text-[11px] text-red-700 font-semibold">
-                          Missed {alt.medicationName} ({alt.dose})
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">
-                        Scheduled for {alt.scheduledDate} at {alt.scheduledTime} • Logged at {new Date(alt.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              missedAlerts.map((alt) => {
+                const isProblem = alt.type === 'problem_reported';
+                return (
+                  <div
+                    key={alt.id}
+                    className={`p-3 rounded-xl border flex items-center justify-between text-xs transition-all ${
+                      isProblem
+                        ? 'bg-red-100/90 border-red-400 shadow-sm'
+                        : alt.read
+                        ? 'bg-white/60 border-slate-200 opacity-70'
+                        : 'bg-white border-red-300 shadow-2xs'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      {isProblem ? (
+                        <AlertTriangle className="h-4 w-4 text-red-600 shrink-0 mt-0.5 animate-bounce" />
+                      ) : (
+                        <span className="h-2 w-2 rounded-full bg-red-500 mt-1.5 shrink-0" />
+                      )}
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <strong className="text-slate-900 font-bold">{alt.patientName}</strong>
+                          {isProblem ? (
+                            <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-red-600 text-white uppercase">
+                              PROBLEM REPORTED IN VOICE CALL
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-red-700 font-semibold">
+                              Missed {alt.medicationName} ({alt.dose})
+                            </span>
+                          )}
+                        </div>
+                        {alt.details && (
+                          <div className="text-xs text-red-900 font-medium mt-1 bg-red-50 p-1.5 rounded-lg border border-red-200">
+                            {alt.details}
+                          </div>
+                        )}
+                        <div className="text-[11px] text-slate-500 mt-0.5">
+                          Scheduled for {alt.scheduledDate} at {alt.scheduledTime} • Logged at{' '}
+                          {new Date(alt.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  {!alt.read && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleAcknowledgeAlert(alt.id)}
-                      className="text-[10px] h-7 px-2 font-bold text-red-700 border-red-200 hover:bg-red-50 shrink-0"
-                    >
-                      Acknowledge
-                    </Button>
-                  )}
-                </div>
-              ))
+                    {!alt.read && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleAcknowledgeAlert(alt.id)}
+                        className="text-[10px] h-7 px-2 font-bold text-red-700 border-red-200 hover:bg-red-50 shrink-0"
+                      >
+                        Acknowledge
+                      </Button>
+                    )}
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -457,14 +495,49 @@ export function PatientsView({ onStartNewConsultation, doctorId = 'doc-demo' }: 
                 </CardContent>
               </Card>
 
-              {/* ACTIVE PRESCRIPTION SECTION */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                    <Pill className="h-4 w-4 text-teal-600" />
-                    <span>Active Prescriptions ({patientPrescriptions.length})</span>
-                  </h3>
-                </div>
+              {/* Patient Detail Tabs: Regimen & Doses vs Call Log */}
+              <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+                <button
+                  type="button"
+                  onClick={() => setPatientDetailTab('regimen')}
+                  className={`py-2 px-4 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                    patientDetailTab === 'regimen'
+                      ? 'bg-teal-700 text-white shadow-xs'
+                      : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                  }`}
+                >
+                  <Pill className="h-4 w-4" />
+                  <span>Prescriptions &amp; Doses</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setPatientDetailTab('calls')}
+                  className={`py-2 px-4 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                    patientDetailTab === 'calls'
+                      ? 'bg-teal-700 text-white shadow-xs'
+                      : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                  }`}
+                >
+                  <PhoneCall className="h-4 w-4 text-teal-400" />
+                  <span>AI Call Log ({patientCallLogs.length})</span>
+                  {patientCallLogs.some((c) => c.result === 'Problem reported') && (
+                    <span className="h-2 w-2 rounded-full bg-red-500 animate-ping" />
+                  )}
+                </button>
+              </div>
+
+              {/* TAB 1: REGIMEN & DOSES */}
+              {patientDetailTab === 'regimen' && (
+                <>
+                  {/* ACTIVE PRESCRIPTION SECTION */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                        <Pill className="h-4 w-4 text-teal-600" />
+                        <span>Active Prescriptions ({patientPrescriptions.length})</span>
+                      </h3>
+                    </div>
 
                 {patientPrescriptions.length === 0 ? (
                   <Card className="p-8 text-center border-dashed border-slate-300 rounded-3xl">
@@ -638,12 +711,206 @@ export function PatientsView({ onStartNewConsultation, doctorId = 'doc-demo' }: 
                 </div>
               </div>
             </>
-          ) : (
-            <Card className="p-12 text-center border-slate-200 rounded-3xl">
-              <Users className="h-10 w-10 text-slate-400 mx-auto mb-2" />
-              <p className="text-sm font-semibold text-slate-700">Select a patient to view clinical profile</p>
-            </Card>
           )}
+
+          {/* TAB 2: AI VOICE CALL LOG */}
+          {patientDetailTab === 'calls' && (
+            <div className="space-y-4">
+              {/* Call Summary Metrics Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+                <div className="p-3 rounded-2xl bg-teal-50 border border-teal-200">
+                  <span className="text-teal-800 font-bold uppercase text-[10px] block">Total Calls</span>
+                  <div className="text-xl font-black text-teal-900 mt-0.5">
+                    {patientCallLogs.length}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200">
+                  <span className="text-emerald-800 font-bold uppercase text-[10px] block">Answered - Taken</span>
+                  <div className="text-xl font-black text-emerald-900 mt-0.5">
+                    {patientCallLogs.filter((c) => c.result === 'Answered-Taken').length}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                  <span className="text-slate-600 font-bold uppercase text-[10px] block">Not Answered</span>
+                  <div className="text-xl font-black text-slate-800 mt-0.5">
+                    {patientCallLogs.filter((c) => c.result === 'Not answered').length}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-red-50 border border-red-200">
+                  <span className="text-red-800 font-bold uppercase text-[10px] block">Problem Reported</span>
+                  <div className="text-xl font-black text-red-900 mt-0.5">
+                    {patientCallLogs.filter((c) => c.result === 'Problem reported').length}
+                  </div>
+                </div>
+              </div>
+
+              {/* Call Log Records Table */}
+              <div className="border border-slate-200 rounded-3xl overflow-hidden bg-white shadow-xs">
+                <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <PhoneCall className="h-4 w-4 text-teal-600" />
+                    <strong className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                      Simulated Voice Call History ({patientCallLogs.length} Calls)
+                    </strong>
+                  </div>
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    All calls logged with transcripts &amp; audit trails
+                  </span>
+                </div>
+
+                {patientCallLogs.length === 0 ? (
+                  <div className="p-8 text-center text-slate-400 italic text-xs">
+                    No voice reminder calls logged for this patient yet. Use the demo panel to trigger a test call.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {patientCallLogs.map((call) => {
+                      const isExpanded = expandedCallId === call.id;
+                      const isProblem = call.result === 'Problem reported';
+                      const isTaken = call.result === 'Answered-Taken';
+                      const isNotYet = call.result === 'Answered-Not yet';
+                      const isLater = call.result === 'Answered-Later';
+
+                      return (
+                        <div key={call.id} className="p-4 hover:bg-slate-50/70 transition-colors">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-3">
+                              <div
+                                className={`h-9 w-9 rounded-xl flex items-center justify-center shrink-0 ${
+                                  isProblem
+                                    ? 'bg-red-100 text-red-700'
+                                    : isTaken
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : isNotYet
+                                    ? 'bg-amber-100 text-amber-700'
+                                    : isLater
+                                    ? 'bg-indigo-100 text-indigo-700'
+                                    : 'bg-slate-100 text-slate-600'
+                                }`}
+                              >
+                                {isProblem ? (
+                                  <AlertTriangle className="h-4 w-4 animate-bounce" />
+                                ) : (
+                                  <PhoneCall className="h-4 w-4" />
+                                )}
+                              </div>
+
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <strong className="text-xs font-bold text-slate-900">
+                                    {call.medicationName} ({call.dose})
+                                  </strong>
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase flex items-center gap-1 ${
+                                      isProblem
+                                        ? 'bg-red-100 text-red-800 border border-red-300'
+                                        : isTaken
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : isNotYet
+                                        ? 'bg-amber-100 text-amber-800'
+                                        : isLater
+                                        ? 'bg-indigo-100 text-indigo-800'
+                                        : 'bg-slate-100 text-slate-700'
+                                    }`}
+                                  >
+                                    {isTaken ? (
+                                      <CheckCircle2 className="h-3 w-3" />
+                                    ) : isProblem ? (
+                                      <AlertTriangle className="h-3 w-3" />
+                                    ) : (
+                                      <Clock className="h-3 w-3" />
+                                    )}
+                                    {call.result}
+                                  </span>
+                                </div>
+
+                                <div className="text-[11px] text-slate-500 mt-0.5">
+                                  {new Date(call.timestamp).toLocaleString([], {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    year: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}{' '}
+                                  • Duration: {call.durationSeconds}s
+                                  {call.scheduledTime && ` • Scheduled: ${call.scheduledTime}`}
+                                </div>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => setExpandedCallId(isExpanded ? null : call.id)}
+                              className="px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-white text-xs font-semibold text-slate-600 flex items-center gap-1 cursor-pointer"
+                            >
+                              <MessageSquare className="h-3.5 w-3.5 text-teal-600" />
+                              <span>{isExpanded ? 'Hide Transcript' : 'View Transcript'}</span>
+                              {isExpanded ? (
+                                <ChevronUp className="h-3 w-3" />
+                              ) : (
+                                <ChevronDown className="h-3 w-3" />
+                              )}
+                            </button>
+                          </div>
+
+                          {call.notes && (
+                            <div className="mt-2 text-[11px] text-slate-600 pl-12 font-medium">
+                              Note: {call.notes}
+                            </div>
+                          )}
+
+                          {/* Expandable Conversation Transcript */}
+                          {isExpanded && (
+                            <div className="mt-3 pl-12 pr-2 animate-in fade-in duration-200">
+                              <div className="p-3 rounded-2xl bg-slate-900 text-white text-xs space-y-2 border border-slate-700">
+                                <div className="text-[10px] font-bold uppercase tracking-wider text-teal-400 border-b border-slate-700 pb-1 flex items-center justify-between">
+                                  <span>Call Audio Transcript</span>
+                                  <span className="text-slate-400 font-mono">
+                                    {call.transcript.length} lines logged
+                                  </span>
+                                </div>
+
+                                {call.transcript.length === 0 ? (
+                                  <p className="text-slate-400 italic">No verbal interaction recorded.</p>
+                                ) : (
+                                  call.transcript.map((entry, idx) => (
+                                    <div
+                                      key={idx}
+                                      className={`flex flex-col gap-0.5 ${
+                                        entry.speaker === 'assistant'
+                                          ? 'text-teal-200'
+                                          : 'text-slate-100 pl-3 border-l-2 border-teal-500'
+                                      }`}
+                                    >
+                                      <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase">
+                                        <span>{entry.speaker === 'assistant' ? '🤖 Clinic Assistant' : '👤 Patient'}</span>
+                                        {entry.time && <span className="font-mono text-slate-500">[{entry.time}]</span>}
+                                      </div>
+                                      <p className="text-xs leading-relaxed">{entry.text}</p>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <Card className="p-12 text-center border-slate-200 rounded-3xl">
+          <Users className="h-10 w-10 text-slate-400 mx-auto mb-2" />
+          <p className="text-sm font-semibold text-slate-700">Select a patient to view clinical profile</p>
+        </Card>
+      )}
         </div>
       </div>
     </div>

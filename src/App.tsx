@@ -389,7 +389,7 @@ function ClinicNoteApp() {
     }
   };
 
-  // Screen 4: Approve & Sign Note (with AES-GCM Encryption into IndexedDB)
+  // Screen 4: Approve & Sign Note (AES-GCM encrypted before local and SQLite storage)
   const handleApproveAndSave = async () => {
     const timestamp = new Date().toISOString();
     const approvedMeta: ConsultationMetadata = {
@@ -399,8 +399,6 @@ function ClinicNoteApp() {
       approvedBy: 'Dr. Demo, MD',
     };
 
-    setMetadata(approvedMeta);
-
     const newRecord: SavedConsultationRecord = {
       metadata: approvedMeta,
       transcript: transcriptLines,
@@ -408,9 +406,7 @@ function ClinicNoteApp() {
       auditTrail: auditLogs,
     };
 
-    setSavedRecords((prev) => [newRecord, ...prev]);
-
-    // Encrypt with Web Crypto API and save to IndexedDB
+    // Encrypt in the browser before syncing the record to local storage and SQLite.
     try {
       let activeKey = cryptoKey;
       if (!activeKey) {
@@ -437,13 +433,20 @@ function ClinicNoteApp() {
       };
 
       await saveEncryptedRecordToDB(encryptedRecord);
-    } catch (encErr) {
-      console.warn('Encryption save fallback:', encErr);
+    } catch (error) {
+      console.error('Encrypted record save failed:', error);
+      showError(
+        'Database Save Failed',
+        'The encrypted record could not be synced to the server database. Please retry.'
+      );
+      return;
     }
 
+    setMetadata(approvedMeta);
+    setSavedRecords((prev) => [newRecord, ...prev]);
     addAuditEntry(
       'Physician Signature & Approval',
-      `Dr. Demo, MD confirmed all red flags, reviewed line citations, and electronically signed the SOAP note for ${approvedMeta.patientName}. Encrypted with AES-GCM-256 into IndexedDB.`,
+      `Dr. Demo, MD confirmed all red flags, reviewed line citations, and electronically signed the SOAP note for ${approvedMeta.patientName}. Encrypted with AES-GCM-256 before local and server-side SQLite storage.`,
       'approved'
     );
 
@@ -490,17 +493,21 @@ function ClinicNoteApp() {
 
   const handleDeleteRecord = async (id: string) => {
     const toDelete = savedRecords.find((r) => r.metadata.id === id);
-    setSavedRecords((prev) => prev.filter((r) => r.metadata.id !== id));
-
     try {
       await deleteRecordFromDB(id);
-    } catch (e) {
-      console.warn('Deleting from IndexedDB:', e);
+    } catch (error) {
+      console.error('Deleting encrypted record failed:', error);
+      showError(
+        'Database Delete Failed',
+        'The record could not be removed from the server database. Please retry.'
+      );
+      return;
     }
 
+    setSavedRecords((prev) => prev.filter((r) => r.metadata.id !== id));
     addAuditEntry(
       'Clinical Record Permanently Deleted',
-      `Dr. Demo permanently purged clinical record ID ${id} (${toDelete?.metadata.patientName || 'Patient'}) from encrypted IndexedDB vault.`,
+      `Dr. Demo permanently purged clinical record ID ${id} (${toDelete?.metadata.patientName || 'Patient'}) from local and server-side encrypted vault storage.`,
       'deleted'
     );
 
@@ -528,6 +535,7 @@ function ClinicNoteApp() {
         activeTab={activeTab}
         onLogout={handleLogout}
         doctorName={currentUser.name}
+        onNavigateTab={(tab) => setActiveTab(tab)}
       />
 
       {/* Main Body with Sidebar + Content */}

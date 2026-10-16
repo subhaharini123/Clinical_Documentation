@@ -26,9 +26,15 @@ import {
   getPatientRoutine,
   savePatientRoutine,
   DEFAULT_ROUTINE,
-  addAuditLogEntry
+  addAuditLogEntry,
+  VoiceReminderSettings,
+  DEFAULT_VOICE_SETTINGS,
+  getPatientVoiceSettings,
+  savePatientVoiceSettings,
 } from '../../lib/store';
+import { reminderEngine } from '../../lib/reminderEngine';
 import { useToast } from '../ui/toast';
+import { PhoneCall, Phone, Sparkles, Volume2 } from 'lucide-react';
 
 interface PatientProfileViewProps {
   patient: StoredPatient;
@@ -43,24 +49,58 @@ export function PatientProfileView({
   onLanguageChange,
   onLogout,
 }: PatientProfileViewProps) {
-  const { showSuccess } = useToast();
+  const { showSuccess, showInfo } = useToast();
   const [routine, setRoutine] = useState<PatientRoutine>({
     patientId: patient.id,
     ...DEFAULT_ROUTINE,
   });
+  const [voiceSettings, setVoiceSettings] = useState<VoiceReminderSettings>(DEFAULT_VOICE_SETTINGS);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSavingVoice, setIsSavingVoice] = useState(false);
 
   useEffect(() => {
-    const loadRoutine = async () => {
+    const loadData = async () => {
       try {
         const r = await getPatientRoutine(patient.id);
         setRoutine(r);
+        const vs = await getPatientVoiceSettings(patient.id);
+        setVoiceSettings(vs);
       } catch (err) {
-        console.error('Failed to load routine:', err);
+        console.error('Failed to load settings:', err);
       }
     };
-    loadRoutine();
+    loadData();
   }, [patient.id]);
+
+  const handleUpdateVoiceSettings = async (updates: Partial<VoiceReminderSettings>) => {
+    const updated = { ...voiceSettings, ...updates };
+    setVoiceSettings(updated);
+    setIsSavingVoice(true);
+    try {
+      await savePatientVoiceSettings(patient.id, updated);
+      await addAuditLogEntry({
+        action: 'Voice Call Reminder Settings Updated',
+        user: patient.name,
+        role: 'patient',
+        details: `Voice settings updated: enabled=${updated.enabled}, language=${updated.language}, delay=${updated.callAfterMinutes}m, speed=${updated.voiceSpeed}x.`,
+        patientId: patient.id,
+      });
+      showSuccess('Voice Settings Updated', 'Voice reminder preferences saved.');
+    } catch (err) {
+      console.error('Failed to save voice settings:', err);
+    } finally {
+      setIsSavingVoice(false);
+    }
+  };
+
+  const handleTestCallNow = async () => {
+    try {
+      showInfo('Incoming Call', 'Initiating simulated voice reminder call...');
+      await reminderEngine.demoTriggerCall();
+    } catch (err) {
+      console.error('Test call error:', err);
+    }
+  };
 
   const handleSaveRoutine = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -257,6 +297,140 @@ export function PatientProfileView({
               <span>{isSaving ? 'Saving...' : 'Save Routine Times'}</span>
             </Button>
           </form>
+        </CardContent>
+      </Card>
+
+      {/* AI VOICE CALL REMINDER SETTINGS */}
+      <Card className="border-teal-200/90 shadow-sm rounded-3xl overflow-hidden bg-gradient-to-b from-teal-50/40 to-white">
+        <CardHeader className="p-5 bg-teal-50/80 border-b border-teal-100/80 flex flex-row items-center justify-between">
+          <div>
+            <CardTitle className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+              <PhoneCall className="h-5 w-5 text-teal-600" />
+              <span>Voice Call Reminders</span>
+            </CardTitle>
+            <p className="text-xs text-slate-500 mt-1">
+              Simulated phone call reminder for overdue doses with AI voice assistant in your chosen language.
+            </p>
+          </div>
+          <Badge
+            variant={voiceSettings.enabled ? 'teal' : 'slate'}
+            size="sm"
+            className="font-bold uppercase text-[10px]"
+          >
+            {voiceSettings.enabled ? 'Active' : 'Disabled'}
+          </Badge>
+        </CardHeader>
+
+        <CardContent className="p-5 space-y-4 text-xs">
+          {/* Toggle Voice Calls */}
+          <div className="flex items-center justify-between p-3 rounded-2xl bg-white border border-slate-200">
+            <div>
+              <strong className="text-xs font-bold text-slate-900 block">
+                Enable Phone Call Reminders
+              </strong>
+              <span className="text-[11px] text-slate-500">
+                Receive an incoming simulated audio call if a dose is not taken on time
+              </span>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={voiceSettings.enabled}
+                onChange={(e) => handleUpdateVoiceSettings({ enabled: e.target.checked })}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-teal-600"></div>
+            </label>
+          </div>
+
+          {/* Language Selection */}
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
+              Assistant Voice Language
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { id: 'tanglish', label: 'Tanglish' },
+                { id: 'tamil', label: 'தமிழ் (Tamil)' },
+                { id: 'english', label: 'English' },
+              ].map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => handleUpdateVoiceSettings({ language: opt.id as any })}
+                  className={`py-2 px-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    voiceSettings.language === opt.id
+                      ? 'bg-teal-700 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Call-After Delay Selection (5, 10, 15 min) */}
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
+              Call Delay After Scheduled Time
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {[5, 10, 15].map((mins) => (
+                <button
+                  key={mins}
+                  type="button"
+                  onClick={() => handleUpdateVoiceSettings({ callAfterMinutes: mins as any })}
+                  className={`py-2 px-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    voiceSettings.callAfterMinutes === mins
+                      ? 'bg-teal-700 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {mins} Minutes {mins === 10 ? '(Default)' : ''}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Voice Speed Selection */}
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
+              Voice Speed
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { speed: 0.85, label: 'Slow (0.85x)' },
+                { speed: 1.0, label: 'Normal (1.0x)' },
+                { speed: 1.15, label: 'Fast (1.15x)' },
+              ].map((s) => (
+                <button
+                  key={s.speed}
+                  type="button"
+                  onClick={() => handleUpdateVoiceSettings({ voiceSpeed: s.speed })}
+                  className={`py-2 px-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    voiceSettings.voiceSpeed === s.speed
+                      ? 'bg-teal-700 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Test Call Now Button */}
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={handleTestCallNow}
+              className="w-full py-2.5 px-4 rounded-xl bg-teal-600 hover:bg-teal-500 active:bg-teal-700 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs cursor-pointer transition-all"
+            >
+              <Phone className="h-4 w-4 text-teal-200 animate-pulse" />
+              <span>Test Call Now (Rings Immediately)</span>
+            </button>
+          </div>
         </CardContent>
       </Card>
 

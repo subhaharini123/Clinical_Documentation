@@ -23,6 +23,7 @@ import { PatientConsentModal } from './PatientConsentModal';
 import { AlertModal } from './AlertModal';
 import { MissedDoseModal } from './MissedDoseModal';
 import { DemoPanel } from './DemoPanel';
+import { CallScreenModal } from './CallScreenModal';
 
 export type PatientTab = 'today' | 'prescriptions' | 'history' | 'profile';
 
@@ -290,8 +291,17 @@ export function PatientApp({ currentUser, onLogout }: PatientAppProps) {
         </nav>
       </div>
 
+      {/* FULL-SCREEN AI VOICE CALL REMINDER MODAL */}
+      {engineState.incomingCallEvent && (
+        <CallScreenModal
+          event={engineState.incomingCallEvent}
+          patient={patient}
+          onClose={() => reminderEngine.dismissCall()}
+        />
+      )}
+
       {/* FULL-SCREEN IN-APP ALERT MODAL (Scheduled Time & 15m Escalation) */}
-      {engineState.activeDueEvent && (
+      {engineState.activeDueEvent && !engineState.incomingCallEvent && (
         <AlertModal
           event={engineState.activeDueEvent}
           escalationLevel={engineState.escalationLevel}

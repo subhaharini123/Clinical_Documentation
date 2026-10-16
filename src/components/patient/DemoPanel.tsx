@@ -10,7 +10,12 @@ import {
   ChevronDown,
   ChevronUp,
   Sparkles,
-  Activity
+  Activity,
+  PhoneCall,
+  Phone,
+  CheckCircle2,
+  AlertOctagon,
+  MessageSquare
 } from 'lucide-react';
 import { StoredPatient } from '../../lib/store';
 import { reminderEngine } from '../../lib/reminderEngine';
@@ -98,6 +103,77 @@ export function DemoPanel({ patient, language = 'english' }: DemoPanelProps) {
         'Missed Dose Escalation Triggered',
         'Simulated 30-minute overdue dose. Doctor alert dispatched and safety advice modal activated.'
       );
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Handle (e): Simulate reminder call now
+  const handleSimulateCallNow = async () => {
+    try {
+      showInfo('Incoming Call Triggered', 'Simulated voice reminder call ringing on patient device.');
+      await reminderEngine.demoTriggerCall();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Handle (f): Simulate patient reply branches without waiting or using microphone
+  const handleSimulatePatientSays = async (reply: 'no' | 'later' | 'unwell' | 'taken') => {
+    try {
+      const state = reminderEngine.getState();
+      let ev = state.incomingCallEvent || state.activeDueEvent;
+      if (!ev) {
+        ev = await reminderEngine.demoTriggerCall();
+      }
+
+      if (reply === 'taken') {
+        await reminderEngine.resolveCallTaken(
+          ev,
+          [
+            { speaker: 'assistant', text: 'It is time for your medicine. Have you taken it?', time: '00:03' },
+            { speaker: 'patient', text: 'Yes, I took it right after lunch.', time: '00:08' },
+            { speaker: 'assistant', text: 'Thank you. I have marked it as taken. Take care, and follow your doctor\'s instructions.', time: '00:14' }
+          ],
+          15
+        );
+        showSuccess('Simulated: Patient Confirmed Taken', 'Dose marked taken. Call log & audit updated.');
+      } else if (reply === 'no') {
+        await reminderEngine.resolveCallNotYet(
+          ev,
+          [
+            { speaker: 'assistant', text: 'It is time for your medicine. Have you taken it?', time: '00:03' },
+            { speaker: 'patient', text: 'No, not yet. I will take it now.', time: '00:08' },
+            { speaker: 'assistant', text: 'Alright, please take it now after food. I will check back with you in 10 minutes. Follow your doctor\'s instructions.', time: '00:16' }
+          ],
+          18
+        );
+        showWarning('Simulated: Patient Said No', 'Advised to take immediately. 10m recheck scheduled.');
+      } else if (reply === 'later') {
+        await reminderEngine.resolveCallLater(
+          ev,
+          15,
+          [
+            { speaker: 'assistant', text: 'It is time for your medicine. Have you taken it?', time: '00:03' },
+            { speaker: 'patient', text: 'Please remind me later in 15 minutes, in a meeting.', time: '00:09' },
+            { speaker: 'assistant', text: 'Understood, I will snooze this reminder for 15 minutes. Follow your doctor\'s instructions.', time: '00:15' }
+          ],
+          17
+        );
+        showInfo('Simulated: Patient Said Later', 'Reminder snoozed for 15 minutes.');
+      } else if (reply === 'unwell') {
+        await reminderEngine.resolveCallUnwell(
+          ev,
+          'Patient reported feeling dizzy, mild rash and nausea after taking medication',
+          [
+            { speaker: 'assistant', text: 'It is time for your medicine. Have you taken it?', time: '00:03' },
+            { speaker: 'patient', text: 'I am feeling unwell, dizzy and itching after taking medicine.', time: '00:09' },
+            { speaker: 'assistant', text: 'Please contact your doctor right away or visit the nearest hospital. Follow your doctor\'s instructions.', time: '00:18' }
+          ],
+          22
+        );
+        showWarning('Simulated: Patient Unwell', 'Urgent Doctor Alert dispatched! Emergency guidance shown.');
+      }
     } catch (err) {
       console.error(err);
     }
@@ -278,6 +354,74 @@ export function DemoPanel({ patient, language = 'english' }: DemoPanelProps) {
               </div>
               <Activity className="h-4 w-4 opacity-70" />
             </button>
+          </div>
+
+          {/* Row 3: AI Voice Call Simulation Section */}
+          <div className="p-3 rounded-xl bg-teal-950/40 border border-teal-500/30 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-black uppercase tracking-wider text-teal-300 flex items-center gap-1.5">
+                <PhoneCall className="h-3.5 w-3.5 text-teal-400" />
+                AI Voice Reminder Call Simulation
+              </span>
+              <span className="text-[10px] text-teal-400 font-bold bg-teal-900/60 px-2 py-0.5 rounded-full border border-teal-500/30">
+                Simulated Telephony
+              </span>
+            </div>
+
+            {/* Main Trigger Call Button */}
+            <button
+              type="button"
+              onClick={handleSimulateCallNow}
+              className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-teal-600 via-teal-500 to-cyan-500 hover:from-teal-500 hover:to-cyan-400 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-md cursor-pointer transition-all active:scale-[0.99]"
+            >
+              <PhoneCall className="h-4 w-4 text-white animate-bounce" />
+              <span>Simulate Reminder Call Now (Incoming Phone Ring)</span>
+            </button>
+
+            {/* Quick Simulate Patient Says Buttons */}
+            <div>
+              <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                <MessageSquare className="h-3 w-3 text-cyan-400" />
+                <span>Simulate Patient Speech Input (Without Mic):</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleSimulatePatientSays('taken')}
+                  className="py-1.5 px-2 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/40 text-emerald-200 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                >
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                  <span>Says: Taken</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSimulatePatientSays('no')}
+                  className="py-1.5 px-2 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 border border-amber-400/40 text-amber-200 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Clock className="h-3 w-3 text-amber-400" />
+                  <span>Says: No</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSimulatePatientSays('later')}
+                  className="py-1.5 px-2 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/40 text-indigo-200 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                >
+                  <RotateCcw className="h-3 w-3 text-indigo-400" />
+                  <span>Says: Later</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSimulatePatientSays('unwell')}
+                  className="py-1.5 px-2 rounded-lg bg-rose-600/30 hover:bg-rose-600/50 border border-rose-400/40 text-rose-200 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                >
+                  <AlertTriangle className="h-3 w-3 text-rose-400" />
+                  <span>Says: Unwell</span>
+                </button>
+              </div>
+            </div>
           </div>
 
           <div className="text-[10px] text-slate-400 text-center">

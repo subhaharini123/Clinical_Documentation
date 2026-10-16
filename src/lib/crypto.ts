@@ -2,7 +2,7 @@
  * Cryptographic storage module for ClinicNote AI using standard Web Crypto API:
  * - PBKDF2 with 100,000 iterations for key derivation from doctor passphrase
  * - AES-GCM 256-bit encryption for authenticated confidentiality
- * - IndexedDB storage for encrypted records and retention metadata
+ * - IndexedDB cache plus the local SQLite API for encrypted records
  */
 
 const DB_NAME = 'ClinicNote_Vault_DB';
@@ -149,15 +149,16 @@ function openVaultDB(): Promise<IDBDatabase> {
  * Save encrypted record into IndexedDB.
  */
 export async function saveEncryptedRecordToDB(record: EncryptedRecord): Promise<void> {
-  const db = await openVaultDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE_NAME], 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    const req = store.put(record);
+  await saveRecordToIndexedDB(record);
 
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
+  const response = await fetch('/api/vault/records', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
   });
+  if (!response.ok) {
+    throw new Error(`Server database save failed (HTTP ${response.status})`);
+  }
 }
 
 /**
@@ -165,7 +166,7 @@ export async function saveEncryptedRecordToDB(record: EncryptedRecord): Promise<
  */
 export async function getAllEncryptedRecordsFromDB(): Promise<EncryptedRecord[]> {
   const db = await openVaultDB();
-  return new Promise((resolve, reject) => {
+  const localRecords = await new Promise<EncryptedRecord[]>((resolve, reject) => {
     const tx = db.transaction([STORE_NAME], 'readonly');
     const store = tx.objectStore(STORE_NAME);
     const req = store.getAll();
@@ -173,12 +174,55 @@ export async function getAllEncryptedRecordsFromDB(): Promise<EncryptedRecord[]>
     req.onsuccess = () => resolve(req.result || []);
     req.onerror = () => reject(req.error);
   });
+
+  try {
+    const response = await fetch('/api/vault/records');
+    if (!response.ok) {
+      throw new Error(`Server database read failed (HTTP ${response.status})`);
+    }
+    const data: { records: EncryptedRecord[] } = await response.json();
+    const recordsById = new Map(localRecords.map((record) => [record.id, record]));
+    data.records.forEach((record) => recordsById.set(record.id, record));
+    const combinedRecords = Array.from(recordsById.values());
+    await Promise.all(data.records.map((record) => saveRecordToIndexedDB(record)));
+    return combinedRecords;
+  } catch (error) {
+    console.warn('[ClinicNote Vault] Using local encrypted records; server database unavailable:', error);
+    return localRecords;
+  }
+}
+
+function saveRecordToIndexedDB(record: EncryptedRecord): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction([STORE_NAME], 'readwrite');
+      transaction.objectStore(STORE_NAME).put(record);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    };
+    request.onerror = () => reject(request.error);
+  });
 }
 
 /**
  * Delete a specific record by ID.
  */
 export async function deleteRecordFromDB(id: string): Promise<void> {
+  const response = await fetch(`/api/vault/records/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`Server database delete failed (HTTP ${response.status})`);
+  }
+
   const db = await openVaultDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction([STORE_NAME], 'readwrite');

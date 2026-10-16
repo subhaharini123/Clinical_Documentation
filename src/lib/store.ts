@@ -40,8 +40,52 @@ export interface StoredPatient {
   consentDate?: string;
   notificationPermission?: 'granted' | 'denied' | 'default';
   routine?: PatientRoutine;
+  voiceReminderSettings?: VoiceReminderSettings;
   createdAt: string;
 }
+
+export type CallResult =
+  | 'Answered-Taken'
+  | 'Answered-Not yet'
+  | 'Answered-Later'
+  | 'Not answered'
+  | 'Problem reported';
+
+export interface CallTranscriptEntry {
+  speaker: 'assistant' | 'patient';
+  text: string;
+  time?: string;
+}
+
+export interface StoredCallLog {
+  id: string;
+  patientId: string;
+  patientName: string;
+  medicationName: string;
+  dose: string;
+  scheduledTime?: string;
+  scheduledDate?: string;
+  timestamp: string; // ISO timestamp
+  durationSeconds: number;
+  result: CallResult;
+  transcript: CallTranscriptEntry[];
+  doctorAlertDispatched?: boolean;
+  notes?: string;
+}
+
+export interface VoiceReminderSettings {
+  enabled: boolean;
+  language: 'tamil' | 'english' | 'tanglish';
+  callAfterMinutes: 5 | 10 | 15;
+  voiceSpeed: number; // 0.85, 1.0, 1.15
+}
+
+export const DEFAULT_VOICE_SETTINGS: VoiceReminderSettings = {
+  enabled: true,
+  language: 'tanglish',
+  callAfterMinutes: 10,
+  voiceSpeed: 1.0,
+};
 
 export interface StoredMedication {
   id: string;
@@ -136,6 +180,11 @@ export interface StoredDoseEvent {
   instructions?: string;
   timingRelation?: string;
   timestamp?: string; // fallback
+  callAttemptCount?: number;
+  lastCallAt?: string;
+  lastCallResult?: CallResult;
+  problemReported?: boolean;
+  problemNotes?: string;
 }
 
 export interface MissedDoseAlert {
@@ -148,6 +197,8 @@ export interface MissedDoseAlert {
   scheduledDate: string;
   timestamp: string;
   read: boolean;
+  type?: 'missed_dose' | 'problem_reported';
+  details?: string;
 }
 
 export interface StoredAuditLog {
@@ -205,10 +256,15 @@ interface ClinicNoteDB extends DBSchema {
     value: StoredAuditLog;
     indexes: { 'by-timestamp': string; 'by-patient': string };
   };
+  callLogs: {
+    key: string;
+    value: StoredCallLog;
+    indexes: { 'by-patient': string; 'by-timestamp': string };
+  };
 }
 
 const DB_NAME = 'clinicnote_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise: Promise<IDBPDatabase<ClinicNoteDB>> | null = null;
 
@@ -274,6 +330,13 @@ export function getDB(): Promise<IDBPDatabase<ClinicNoteDB>> {
           const auditStore = db.createObjectStore('auditLog', { keyPath: 'id' });
           auditStore.createIndex('by-timestamp', 'timestamp');
           auditStore.createIndex('by-patient', 'patientId');
+        }
+
+        // Call Logs store
+        if (!db.objectStoreNames.contains('callLogs')) {
+          const callStore = db.createObjectStore('callLogs', { keyPath: 'id' });
+          callStore.createIndex('by-patient', 'patientId');
+          callStore.createIndex('by-timestamp', 'timestamp');
         }
       },
     });
@@ -362,7 +425,46 @@ export async function seedInitialData(): Promise<void> {
       consentGiven: true,
       consentDate: new Date().toISOString(),
       notificationPermission: 'granted',
+      voiceReminderSettings: DEFAULT_VOICE_SETTINGS,
       createdAt: new Date().toISOString(),
+    });
+  } else if (!existingPat.voiceReminderSettings) {
+    existingPat.voiceReminderSettings = DEFAULT_VOICE_SETTINGS;
+    await db.put('patients', existingPat);
+  }
+
+  // Seed sample initial call log for demo realism if empty
+  const existingCalls = await db.getAllFromIndex('callLogs', 'by-patient', 'pat-ravi');
+  if (existingCalls.length === 0) {
+    await db.put('callLogs', {
+      id: 'call-sample-01',
+      patientId: 'pat-ravi',
+      patientName: 'Ravi Kumar',
+      medicationName: 'Paracetamol',
+      dose: '500 mg',
+      scheduledTime: '08:30',
+      scheduledDate: new Date(Date.now() - 86400000).toISOString().slice(0, 10),
+      timestamp: new Date(Date.now() - 86400000 + 10 * 60000).toISOString(),
+      durationSeconds: 24,
+      result: 'Answered-Taken',
+      transcript: [
+        {
+          speaker: 'assistant',
+          text: 'Vanakkam Ravi. Idhu ungal maruthuvar clinic assistant. Ippo Paracetamol 500 mg saappida neram. Neenga saapteengala?',
+          time: '00:03',
+        },
+        {
+          speaker: 'patient',
+          text: 'Aama, breakfast aprama saapten.',
+          time: '00:11',
+        },
+        {
+          speaker: 'assistant',
+          text: 'Nandri. Taken nu mark pannitten. Nalla irunga. Follow your doctor\'s instructions.',
+          time: '00:19',
+        },
+      ],
+      notes: 'Initial scheduled dose confirmed taken during automated morning reminder call.',
     });
   }
 
@@ -902,8 +1004,8 @@ export async function createSchedulesAndInitialDoses(
   customStartDate?: Date
 ): Promise<StoredSchedule[]> {
   const db = await getDB();
-  const tx = db.transaction(['schedules', 'doseEvents'], 'readwrite');
   const routine = await getPatientRoutine(patientId);
+  const tx = db.transaction(['schedules', 'doseEvents'], 'readwrite');
 
   const startRef = customStartDate || new Date();
   const createdSchedules: StoredSchedule[] = [];
@@ -1200,4 +1302,43 @@ export async function getAllAuditLogs(): Promise<StoredAuditLog[]> {
   const db = await getDB();
   const logs = await db.getAll('auditLog');
   return logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+// ----------------- AI Voice Call Logs & Settings -----------------
+
+export async function saveCallLog(log: StoredCallLog): Promise<void> {
+  const db = await getDB();
+  await db.put('callLogs', log);
+}
+
+export async function getCallLogsForPatient(patientId: string): Promise<StoredCallLog[]> {
+  const db = await getDB();
+  const logs = await db.getAllFromIndex('callLogs', 'by-patient', patientId);
+  return logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+export async function getAllCallLogs(): Promise<StoredCallLog[]> {
+  const db = await getDB();
+  const logs = await db.getAll('callLogs');
+  return logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+export async function savePatientVoiceSettings(
+  patientId: string,
+  settings: VoiceReminderSettings
+): Promise<void> {
+  const db = await getDB();
+  const patient = await db.get('patients', patientId);
+  if (patient) {
+    patient.voiceReminderSettings = settings;
+    await db.put('patients', patient);
+  }
+}
+
+export async function getPatientVoiceSettings(
+  patientId: string
+): Promise<VoiceReminderSettings> {
+  const db = await getDB();
+  const patient = await db.get('patients', patientId);
+  return patient?.voiceReminderSettings || DEFAULT_VOICE_SETTINGS;
 }

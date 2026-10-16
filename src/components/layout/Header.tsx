@@ -1,7 +1,9 @@
-import { Activity, ShieldAlert, Sparkles, LogOut } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Activity, ShieldAlert, Sparkles, LogOut, Bell, AlertTriangle } from 'lucide-react';
 import { Badge } from '../ui/badge';
 import { Stepper, StepKey } from './Stepper';
 import { MainNavTab } from './Sidebar';
+import { getMissedDoseAlerts, MissedDoseAlert } from '../../lib/store';
 
 interface HeaderProps {
   currentStep: StepKey;
@@ -10,6 +12,7 @@ interface HeaderProps {
   activeTab: MainNavTab;
   onLogout?: () => void;
   doctorName?: string;
+  onNavigateTab?: (tab: MainNavTab) => void;
 }
 
 export function Header({
@@ -19,7 +22,24 @@ export function Header({
   activeTab,
   onLogout,
   doctorName,
+  onNavigateTab,
 }: HeaderProps) {
+  const [alerts, setAlerts] = useState<MissedDoseAlert[]>([]);
+
+  useEffect(() => {
+    const fetchAlerts = async () => {
+      try {
+        const alts = await getMissedDoseAlerts();
+        setAlerts(alts);
+      } catch {}
+    };
+    fetchAlerts();
+    const interval = setInterval(fetchAlerts, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const unreadAlerts = alerts.filter((a) => !a.read);
+  const problemAlerts = unreadAlerts.filter((a) => a.type === 'problem_reported');
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-slate-200/80 shadow-xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -67,6 +87,41 @@ export function Header({
               <ShieldAlert className="h-3 w-3 text-amber-600 shrink-0" />
               <span className="hidden xs:inline">Demo mode: </span>synthetic data only
             </Badge>
+
+            {/* Notification Bell with Red Alert when problem reported */}
+            <button
+              type="button"
+              onClick={() => onNavigateTab?.('patients')}
+              className={`relative p-2 rounded-xl border transition-all cursor-pointer flex items-center justify-center ${
+                problemAlerts.length > 0
+                  ? 'bg-red-600 border-red-700 text-white shadow-md animate-pulse ring-2 ring-red-400'
+                  : unreadAlerts.length > 0
+                  ? 'bg-red-50 border-red-300 text-red-800 hover:bg-red-100'
+                  : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100'
+              }`}
+              title={
+                problemAlerts.length > 0
+                  ? `URGENT: ${problemAlerts.length} Problem Reported Alert(s)! Click to view.`
+                  : unreadAlerts.length > 0
+                  ? `${unreadAlerts.length} Unread Clinical Alert(s). Click to view.`
+                  : 'Clinical Notifications'
+              }
+            >
+              {problemAlerts.length > 0 ? (
+                <AlertTriangle className="h-4 w-4 text-white animate-bounce" />
+              ) : (
+                <Bell className={`h-4 w-4 ${unreadAlerts.length > 0 ? 'text-red-600 animate-wiggle' : 'text-slate-500'}`} />
+              )}
+              {unreadAlerts.length > 0 && (
+                <span
+                  className={`absolute -top-1.5 -right-1.5 px-1.5 py-0.2 rounded-full text-[9px] font-black leading-tight shadow-xs ${
+                    problemAlerts.length > 0 ? 'bg-white text-red-700 ring-2 ring-red-600' : 'bg-red-600 text-white'
+                  }`}
+                >
+                  {unreadAlerts.length}
+                </span>
+              )}
+            </button>
 
             <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
               <div className="relative">

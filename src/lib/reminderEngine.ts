@@ -19,6 +19,10 @@ import {
   createMissedDoseAlert,
   addAuditLogEntry,
   getPatientById,
+  StoredCallLog,
+  CallTranscriptEntry,
+  saveCallLog,
+  getPatientVoiceSettings,
 } from './store';
 import { simulatedClock, ClockSpeed } from './clock';
 import {
@@ -31,6 +35,7 @@ import {
 export interface EngineState {
   activeDueEvent: StoredDoseEvent | null;
   missedEvent: StoredDoseEvent | null;
+  incomingCallEvent: StoredDoseEvent | null;
   escalationLevel: 1 | 2;
   lastCheckedTime: Date;
   clockSpeed: ClockSpeed;
@@ -48,6 +53,7 @@ class ReminderEngine {
   private state: EngineState = {
     activeDueEvent: null,
     missedEvent: null,
+    incomingCallEvent: null,
     escalationLevel: 1,
     lastCheckedTime: new Date(),
     clockSpeed: 1,
@@ -165,6 +171,36 @@ class ReminderEngine {
 
             this.triggerLevel1Alert(ev);
             break;
+          }
+        }
+
+        // 2b. Due dose with no response for 10 minutes -> Trigger AI Voice Call Reminder
+        if (ev.status === 'due' && elapsedMinutes >= 10 && elapsedMinutes < 30) {
+          const voiceSettings = await getPatientVoiceSettings(this.activePatientId);
+          const callDelay = voiceSettings.callAfterMinutes || 10;
+
+          if (voiceSettings.enabled !== false && elapsedMinutes >= callDelay) {
+            // First call attempt at ~10 mins
+            if (!ev.callAttemptCount || ev.callAttemptCount === 0) {
+              ev.callAttemptCount = 1;
+              ev.lastCallAt = now.toISOString();
+              await saveDoseEvent(ev);
+              this.triggerVoiceCall(ev);
+              break;
+            }
+
+            // Retry call once after 5 minutes if previous attempt was 'Not answered'
+            if (ev.callAttemptCount === 1 && ev.lastCallResult === 'Not answered' && ev.lastCallAt) {
+              const lastCallMs = new Date(ev.lastCallAt).getTime();
+              const minutesSinceLastCall = (nowMs - lastCallMs) / (60 * 1000);
+              if (minutesSinceLastCall >= 5) {
+                ev.callAttemptCount = 2;
+                ev.lastCallAt = now.toISOString();
+                await saveDoseEvent(ev);
+                this.triggerVoiceCall(ev);
+                break;
+              }
+            }
           }
         }
 
@@ -388,7 +424,288 @@ class ReminderEngine {
   public closeModals() {
     this.state.activeDueEvent = null;
     this.state.missedEvent = null;
+    this.state.incomingCallEvent = null;
     this.notify();
+  }
+
+  // ----------------- AI Voice Call Handlers -----------------
+
+  public triggerVoiceCall(ev: StoredDoseEvent) {
+    this.state.incomingCallEvent = ev;
+    this.notify();
+  }
+
+  public dismissCall() {
+    this.state.incomingCallEvent = null;
+    this.notify();
+  }
+
+  /**
+   * Patient answered call and confirmed taken
+   */
+  public async resolveCallTaken(
+    ev: StoredDoseEvent,
+    transcript: CallTranscriptEntry[],
+    durationSeconds: number
+  ) {
+    const nowIso = simulatedClock.getSimulatedTime().toISOString();
+    await updateDoseEventStatus(ev.id, 'taken', nowIso);
+
+    const patient = await getPatientById(ev.patientId);
+    const patientName = patient?.name || 'Ravi Kumar';
+
+    await saveCallLog({
+      id: `call-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      patientId: ev.patientId,
+      patientName,
+      medicationName: ev.medicationName,
+      dose: ev.dose,
+      scheduledTime: ev.scheduledTime,
+      scheduledDate: ev.scheduledDate,
+      timestamp: nowIso,
+      durationSeconds,
+      result: 'Answered-Taken',
+      transcript,
+      notes: 'Patient confirmed taking dose during AI voice call.',
+    });
+
+    await addAuditLogEntry({
+      action: 'Voice Call: Dose Taken Confirmed',
+      user: 'ClinicNote Care Assistant',
+      role: 'system',
+      details: `AI Voice call answered by ${patientName}. Confirmed taken: ${ev.medicationName} (${ev.dose}). Dose event updated to 'taken'.`,
+      patientId: ev.patientId,
+    });
+
+    this.state.incomingCallEvent = null;
+    this.state.activeDueEvent = null;
+    this.notify();
+  }
+
+  /**
+   * Patient answered call and said "Not yet"
+   */
+  public async resolveCallNotYet(
+    ev: StoredDoseEvent,
+    transcript: CallTranscriptEntry[],
+    durationSeconds: number
+  ) {
+    const nowIso = simulatedClock.getSimulatedTime().toISOString();
+    const patient = await getPatientById(ev.patientId);
+    const patientName = patient?.name || 'Ravi Kumar';
+
+    await saveCallLog({
+      id: `call-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      patientId: ev.patientId,
+      patientName,
+      medicationName: ev.medicationName,
+      dose: ev.dose,
+      scheduledTime: ev.scheduledTime,
+      scheduledDate: ev.scheduledDate,
+      timestamp: nowIso,
+      durationSeconds,
+      result: 'Answered-Not yet',
+      transcript,
+      notes: 'Patient stated not yet taken. Advised to take after food, 10-minute follow-up logged.',
+    });
+
+    await addAuditLogEntry({
+      action: 'Voice Call: Dose Not Yet Taken',
+      user: 'ClinicNote Care Assistant',
+      role: 'system',
+      details: `AI Voice call answered by ${patientName}. Patient replied 'Not yet' for ${ev.medicationName} (${ev.dose}). Advised to take immediately; follow-up scheduled.`,
+      patientId: ev.patientId,
+    });
+
+    this.state.incomingCallEvent = null;
+    this.notify();
+  }
+
+  /**
+   * Patient requested snooze / "remind me later"
+   */
+  public async resolveCallLater(
+    ev: StoredDoseEvent,
+    minutes: number = 15,
+    transcript: CallTranscriptEntry[],
+    durationSeconds: number
+  ) {
+    const now = simulatedClock.getSimulatedTime();
+    const snoozedUntil = new Date(now.getTime() + minutes * 60 * 1000).toISOString();
+    await snoozeDoseEvent(ev.id, snoozedUntil);
+
+    const patient = await getPatientById(ev.patientId);
+    const patientName = patient?.name || 'Ravi Kumar';
+
+    await saveCallLog({
+      id: `call-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      patientId: ev.patientId,
+      patientName,
+      medicationName: ev.medicationName,
+      dose: ev.dose,
+      scheduledTime: ev.scheduledTime,
+      scheduledDate: ev.scheduledDate,
+      timestamp: now.toISOString(),
+      durationSeconds,
+      result: 'Answered-Later',
+      transcript,
+      notes: `Patient requested reminder delay. Snoozed for ${minutes} minutes until ${new Date(snoozedUntil).toLocaleTimeString()}.`,
+    });
+
+    await addAuditLogEntry({
+      action: 'Voice Call: Reminder Snoozed',
+      user: 'ClinicNote Care Assistant',
+      role: 'system',
+      details: `AI Voice call answered by ${patientName}. Snoozed for ${minutes} minutes: ${ev.medicationName} (${ev.dose}). Next reminder at ${new Date(snoozedUntil).toLocaleTimeString()}.`,
+      patientId: ev.patientId,
+    });
+
+    this.state.incomingCallEvent = null;
+    this.state.activeDueEvent = null;
+    this.notify();
+  }
+
+  /**
+   * Patient reported feeling unwell or adverse symptoms during the call
+   */
+  public async resolveCallUnwell(
+    ev: StoredDoseEvent,
+    patientStatement: string,
+    transcript: CallTranscriptEntry[],
+    durationSeconds: number
+  ) {
+    const nowIso = simulatedClock.getSimulatedTime().toISOString();
+    const patient = await getPatientById(ev.patientId);
+    const patientName = patient?.name || 'Ravi Kumar';
+
+    // 1. Flag the dose event
+    ev.problemReported = true;
+    ev.problemNotes = patientStatement;
+    await saveDoseEvent(ev);
+
+    // 2. Save call log with Problem reported
+    await saveCallLog({
+      id: `call-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      patientId: ev.patientId,
+      patientName,
+      medicationName: ev.medicationName,
+      dose: ev.dose,
+      scheduledTime: ev.scheduledTime,
+      scheduledDate: ev.scheduledDate,
+      timestamp: nowIso,
+      durationSeconds,
+      result: 'Problem reported',
+      transcript,
+      doctorAlertDispatched: true,
+      notes: `Patient reported problem during reminder call: "${patientStatement}". Clinician attention required.`,
+    });
+
+    // 3. Create high-priority Doctor Alert
+    await createMissedDoseAlert({
+      patientId: ev.patientId,
+      patientName,
+      medicationName: ev.medicationName,
+      dose: ev.dose,
+      scheduledTime: ev.scheduledTime,
+      scheduledDate: ev.scheduledDate,
+      type: 'problem_reported',
+      details: `Patient reported feeling unwell during voice reminder call: "${patientStatement}". Immediate physician follow-up advised.`,
+    });
+
+    // 4. Write to Audit Log
+    await addAuditLogEntry({
+      action: 'URGENT: Patient Reported Problem in Voice Call',
+      user: 'ClinicNote Care Assistant',
+      role: 'system',
+      details: `Patient ${patientName} reported adverse reaction/symptoms during AI reminder call for ${ev.medicationName} (${ev.dose}). Patient statement: "${patientStatement}". Emergency alert dispatched to Dr. Demo.`,
+      patientId: ev.patientId,
+    });
+
+    this.state.incomingCallEvent = null;
+    this.notify();
+  }
+
+  /**
+   * Call was declined or timed out after 30 seconds
+   */
+  public async resolveCallNotAnswered(ev: StoredDoseEvent) {
+    const nowIso = simulatedClock.getSimulatedTime().toISOString();
+    const patient = await getPatientById(ev.patientId);
+    const patientName = patient?.name || 'Ravi Kumar';
+
+    ev.lastCallResult = 'Not answered';
+    await saveDoseEvent(ev);
+
+    await saveCallLog({
+      id: `call-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      patientId: ev.patientId,
+      patientName,
+      medicationName: ev.medicationName,
+      dose: ev.dose,
+      scheduledTime: ev.scheduledTime,
+      scheduledDate: ev.scheduledDate,
+      timestamp: nowIso,
+      durationSeconds: 30,
+      result: 'Not answered',
+      transcript: [
+        {
+          speaker: 'assistant',
+          text: 'Incoming medicine reminder call initiated. No answer / call declined.',
+          time: '00:30',
+        },
+      ],
+      notes: `Patient did not answer call attempt #${ev.callAttemptCount || 1}. Normal escalation flow continuing.`,
+    });
+
+    await addAuditLogEntry({
+      action: 'Voice Call: Not Answered',
+      user: 'ClinicNote Care Assistant',
+      role: 'system',
+      details: `Voice reminder call for ${patientName} (${ev.medicationName} ${ev.dose}) was not answered or declined (Attempt #${ev.callAttemptCount || 1}). Escalation ongoing.`,
+      patientId: ev.patientId,
+    });
+
+    this.state.incomingCallEvent = null;
+    this.notify();
+  }
+
+  /**
+   * Demo & Test trigger: Initiates incoming phone call immediately
+   */
+  public async demoTriggerCall(customEvent?: StoredDoseEvent): Promise<StoredDoseEvent> {
+    if (customEvent) {
+      this.state.incomingCallEvent = customEvent;
+      this.notify();
+      return customEvent;
+    }
+
+    const patient = this.activePatientId ? await getPatientById(this.activePatientId) : null;
+    const now = simulatedClock.getSimulatedTime();
+    const dateStr = now.toISOString().slice(0, 10);
+    const timeStr = now.toTimeString().slice(0, 5);
+
+    const demoCallEvent: StoredDoseEvent = {
+      id: `dose-call-demo-${Date.now()}`,
+      scheduleId: 'sched-demo-call',
+      medicationId: 'med-ravi-01',
+      patientId: patient?.id || 'pat-ravi',
+      medicationName: 'Paracetamol',
+      dose: '500 mg',
+      scheduledAt: now.toISOString(),
+      scheduledDate: dateStr,
+      scheduledTime: timeStr,
+      label: 'afternoon',
+      status: 'due',
+      timingRelation: 'After food',
+      instructions: 'Take 1 tablet with warm water after lunch',
+      callAttemptCount: 1,
+      lastCallAt: now.toISOString(),
+    };
+
+    await saveDoseEvent(demoCallEvent);
+    this.state.incomingCallEvent = demoCallEvent;
+    this.notify();
+    return demoCallEvent;
   }
 
   // ----------------- Hackathon Demo Controls -----------------

@@ -911,3 +911,72 @@ Output strictly in JSON schema:
   };
 }
 
+/**
+ * Classify patient spoken reply in voice reminder call using Gemini Flash (temperature 0)
+ * with structured JSON schema.
+ */
+export async function classifyPatientVoiceReplyWithGemini(
+  text: string,
+  language: string = 'tanglish'
+): Promise<{ intent: 'taken' | 'not_yet' | 'later' | 'unwell' | 'unclear'; confidence: number; explanation?: string }> {
+  const client = getGeminiClient();
+  if (!client) {
+    const { deterministicClassifyVoiceReply } = await import('./callService.js');
+    return {
+      intent: deterministicClassifyVoiceReply(text),
+      confidence: 0.95,
+      explanation: 'Deterministic local classification (Gemini key not configured)',
+    };
+  }
+
+  const prompt = `You are a clinical care reminder assistant analyzing a patient's spoken response during an automated phone call reminder.
+The assistant just asked: "It is now time to take your medicine. Have you taken it?"
+The patient responded in ${language}: "${text}"
+
+Classify the response into EXACTLY ONE category:
+- "taken": Patient explicitly confirms taking or consuming the medication (e.g., "yes", "taken", "saapten", "took it", "aama", "potuten", "done").
+- "not_yet": Patient indicates they have not taken it yet, forgot, or will take it now (e.g., "no", "not yet", "illa", "innum illa", "saapidala").
+- "later": Patient requests to be reminded later or snooze (e.g., "later", "remind me in 15 mins", "busy", "apram", "snooze").
+- "unwell": Patient reports feeling sick, side effects, vomiting, rash, dizziness, chest pain, or breathing difficulty (e.g., "unwell", "vomiting", "rash", "dizzy", "mayakkam", "nenju vali", "moochu thinaral").
+- "unclear": Garbled, unintelligible, ambiguous, or irrelevant reply.
+
+Return structured JSON.`;
+
+  try {
+    const response = await client.models.generateContent({
+      model: GEMINI_TEXT_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            intent: {
+              type: Type.STRING,
+              enum: ['taken', 'not_yet', 'later', 'unwell', 'unclear'],
+            },
+            confidence: { type: Type.NUMBER },
+            explanation: { type: Type.STRING },
+          },
+          required: ['intent', 'confidence'],
+        },
+        temperature: 0,
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    if (parsed.intent && ['taken', 'not_yet', 'later', 'unwell', 'unclear'].includes(parsed.intent)) {
+      return parsed;
+    }
+  } catch (err) {
+    console.warn('[AI] Gemini classification error, falling back:', err);
+  }
+
+  const { deterministicClassifyVoiceReply } = await import('./callService.js');
+  return {
+    intent: deterministicClassifyVoiceReply(text),
+    confidence: 0.9,
+    explanation: 'Deterministic clinical keyword fallback',
+  };
+}
+
